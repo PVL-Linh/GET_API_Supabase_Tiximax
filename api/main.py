@@ -1,6 +1,5 @@
 from fastapi import FastAPI
-from supabase_api import get_user_data   # nếu anh dùng supabase_api.py
-# hoặc anh import từ api/supabase.py nếu cần
+from api.supabase import handler  # Import từ api/supabase.py
 
 app = FastAPI()
 
@@ -11,3 +10,8 @@ def root():
 @app.get("/test")
 def test():
     return {"status": "ok"}
+
+# Convert handler (Vercel style) → FastAPI route
+@app.get("/api/{table}")
+def supabase_proxy(table: str, request: dict = None):
+    return handler(request)
