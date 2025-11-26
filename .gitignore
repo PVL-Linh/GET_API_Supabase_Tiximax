@@ -6,3 +6,4 @@ venv/
 .env.local
 .idea/
 .vscode/
+render.yaml
