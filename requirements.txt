@@ -1,4 +1,3 @@
-fastapi
-uvicorn
-supabase
-python-dotenv
+fastapi==0.117.1
+python-supabase==2.7.6
+uvicorn[standard]==0.32.0
