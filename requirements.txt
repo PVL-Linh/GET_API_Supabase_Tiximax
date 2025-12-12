@@ -2,3 +2,4 @@ fastapi
 supabase
 python-dotenv
 uvicorn
+psycopg2-binary
