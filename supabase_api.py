@@ -48,14 +48,15 @@ TABLES: List[str] = [
     "customer",
     "destination",
     "domestic",
-    "domestic_packing",
+    "domestic_packing",        # đã sửa FK
     "feedback",
     "order_links",
     "order_process_log",
     "orders",
     "packing",
+    "packing_domestic",        # mới thêm (trước tên sai)
     "payment",
-    "payment_orders",
+    "payment_orders",          # mới thêm vào list expose
     "product_type",
     "purchases",
     "route",
@@ -64,6 +65,8 @@ TABLES: List[str] = [
     "warehouse",
     "warehouse_location",
     "websites",
+    "order_payment_link",      # nếu dùng
+    "notification",            # nếu dùng realtime notification
 ]
 
 # ====== BỘ NHỚ TÊN CỘT (cache tạm trong RAM) ======
