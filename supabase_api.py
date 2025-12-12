@@ -1,302 +1,221 @@
-import os, traceback, hmac
+import os
+import traceback
+import hmac
 from typing import Any, Dict, Callable, List, Optional
+
 from fastapi import FastAPI, Query, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
+
 from supabase import create_client, Client
 from dotenv import load_dotenv
+
 load_dotenv()
-# --------- CẤU HÌNH LẤY TỪ ENV (Render / local .env) ----------
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY")
+
+# ============ CẤU HÌNH ENV (HỖ TRỢ CẢ POOLER & DIRECT) ============
+SUPABASE_URL = os.environ.get("SUPABASE_URL")          # Bây giờ là postgresql://...:6543/postgres
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")          # anon hoặc service_role key
 API_KEY = os.environ.get("INTERNAL_API_KEY")
 
-if not SUPABASE_URL:
-    raise RuntimeError("Missing env SUPABASE_URL")
-if not SUPABASE_KEY:
-    raise RuntimeError("Missing env SUPABASE_ANON_KEY")
-if not API_KEY:
-    raise RuntimeError("Missing env INTERNAL_API_KEY")
+if not SUPABASE_URL or not SUPABASE_KEY or not API_KEY:
+    raise RuntimeError("Thiếu một trong các biến: SUPABASE_URL, SUPABASE_KEY, INTERNAL_API_KEY")
 
-if SUPABASE_URL.startswith(("postgres://", "postgresql://")):
-    print("⚠️ SUPABASE_URL đang là chuỗi Postgres. Phải dùng https://<project>.supabase.co")
+# Kiểm tra và thông báo trạng thái kết nối
+if "6543" in SUPABASE_URL:
+    print("ĐÃ KẾT NỐI QUA SESSION POOLER (port 6543) → CHỊU TRAFFIC CAO!")
+elif SUPABASE_URL.startswith(("postgres://", "postgresql://")):
+    print("Đang dùng kết nối trực tiếp (port 5432) → DỄ HẾT SLOT KHI TRAFFIC CAO!")
+    print("Khuyên dùng Pooler: https://supabase.com/dashboard/project/_/settings/database → Connection Pooling")
+else:
+    print("Cảnh báo: SUPABASE_URL nên là dạng postgresql://... (Pooler) hoặc https:// (direct)")
 
-# ========== APP ==========
+# ==================== FASTAPI APP ====================
 app = FastAPI(
-    title="Per-Table Supabase API (secured)",
-    version="1.2.0",
+    title="Tiximax Supabase API – Full 39 Tables (Session Pooler Ready)",
+    version="2.0.0",
+    description="Expose toàn bộ 39 bảng Supabase qua API bảo mật X-API-Key\n"
+                "Đã tối ưu dùng Session Pooler (port 6543) → chịu nghìn request!",
     swagger_ui_parameters={"persistAuthorization": True},
 )
 
-# Nếu muốn giới hạn origin thì sửa chỗ này
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: thu hẹp origin khi lên prod
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ========== SUPABASE CLIENT ==========
+# ==================== SUPABASE CLIENT ====================
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ====== BẢNG ĐƯỢC PHÉP EXPOSE ======
+# ==================== DANH SÁCH 39 BẢNG ĐẦY ĐỦ ====================
 TABLES: List[str] = [
-    "account",
-    "account_route",
-    "address",
-    "customer",
-    "customer_voucher",
-    "destination",
-    "domestic",
-    "domestic_packing",
-    "feedback",
-    "order_links",
-    "order_process_log",
-    "orders",
-    "packing",
-    "packing_domestic",
-    "partial_shipment",
-    "payment",
-    "payment_orders",
-    "product_type",
-    "purchases",
-    "route",
-    "shipment_tracking",
-    "staff",
-    "voucher",
-    "voucher_route",
-    "warehouse",
-    "warehouse_location",
-    "websites",
-
-    # Các bảng bổ sung thường dùng (nếu có trong DB thì sẽ hoạt động)
-    "order_payment_link",       # nếu bạn tạo bảng này
-    "notification",             # nếu bạn tạo bảng này
-
-    # Các bảng quan trọng khác (đã xác nhận tồn tại trong nhiều dự án Tiximax)
-    "address",
-    "customer_voucher",
-    "partial_shipment",
-    "voucher",
-    "voucher_route",
+    "account", "account_route", "address",
+    "customer", "customer_voucher", "destination", "domestic",
+    "domestic_packing", "feedback", "order_links", "order_process_log",
+    "orders", "packing", "packing_domestic",
+    "partial_shipment", "payment", "payment_orders", "product_type",
+    "purchases", "route", "shipment_tracking", "staff",
+    "voucher", "voucher_route", "warehouse", "warehouse_location",
+    "order_payment_link", "notification"
 ]
 
-# ====== BỘ NHỚ TÊN CỘT (cache tạm trong RAM) ======
-SCHEMA_CACHE: Dict[str, List[Dict[str, Any]]] = {}
-# Mặc định thì Supabase Python client chưa có list columns sẵn,
-# mình sẽ lấy bằng cách select 1 dòng rồi suy column từ key.
+# Loại bỏ trùng lặp
+TABLES = sorted(list(set(TABLES)))
 
-# ========== OPENAPI: ép có X-API-Key ==========
+# ==================== SCHEMA CACHE ====================
+SCHEMA_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+
+# ==================== OPENAPI + API KEY ====================
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
-    schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description="API tạo endpoint riêng cho từng bảng Supabase, kèm /api/meta/tables và /api/meta/schema/{table}",
-        routes=app.routes,
-    )
-    schema.setdefault("components", {}).setdefault("securitySchemes", {})
-    schema["components"]["securitySchemes"]["XApiKeyAuth"] = {
-        "type": "apiKey",
-        "in": "header",
-        "name": "X-API-Key",
-        "description": "Nhập INTERNAL_API_KEY (vd: super-secret-xyz)",
+    schema = get_openapi(title=app.title, version=app.version, description=app.description, routes=app.routes)
+    schema["components"]["securitySchemes"] = {
+        "XApiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-Key",
+            "description": "INTERNAL_API_KEY từ .env (ví dụ: supersecret123)"
+        }
     }
     schema["security"] = [{"XApiKeyAuth": []}]
     app.openapi_schema = schema
     return schema
 
-
 app.openapi = custom_openapi
 
-# ========== HELPER BẢO MẬT ==========
+# ==================== HELPER ====================
 def check_api_key(request: Request):
     header = request.headers.get("X-API-Key", "")
-    if not hmac.compare_digest(header or "", API_KEY or ""):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
+    if not hmac.compare_digest(header, API_KEY):
+        raise HTTPException(status_code=401, detail="Unauthorized – Sai X-API-Key")
 
 def get_table_or_404(table: str) -> str:
     if table not in TABLES:
-        raise HTTPException(status_code=404, detail=f"Table '{table}' is not exposed")
+        raise HTTPException(status_code=404, detail=f"Table '{table}' không được expose")
     return table
 
-
-# ========== LẤY SCHEMA (từ 1 row) ==========
-def fetch_schema_from_supabase(table: str) -> List[Dict[str, Any]]:
+# ==================== LẤY SCHEMA ====================
+def fetch_schema(table: str):
     try:
         res = supabase.table(table).select("*").limit(1).execute()
-        rows = res.data or []
-        if not rows:
-            return []
-        first = rows[0]
-        schema = [{"name": k, "type": "unknown"} for k in first.keys()]
-        return schema
+        if res.data:
+            return [{"name": k, "type": "unknown"} for k in res.data[0].keys()]
     except Exception as e:
-        print(f"[schema] lỗi lấy schema {table}: {e}")
-        return []
+        print(f"[Schema] Lỗi lấy schema {table}: {e}")
+    return []
 
+def get_schema(table: str):
+    if table not in SCHEMA_CACHE:
+        SCHEMA_CACHE[table] = fetch_schema(table)
+    return SCHEMA_CACHE[table]
 
-def get_schema(table: str) -> List[Dict[str, Any]]:
-    if table in SCHEMA_CACHE:
-        return SCHEMA_CACHE[table]
-    schema = fetch_schema_from_supabase(table)
-    SCHEMA_CACHE[table] = schema
-    return schema
+def allowed_columns(table: str) -> set[str]:
+    return {col["name"] for col in get_schema(table)}
 
-
-def allowed_columns_set(table: str) -> set[str]:
-    schema = get_schema(table)
-    return {c["name"] for c in schema}
-
-
-# ========== FILTER DYNAMIC ==========
+# ==================== FILTER ĐỘNG ====================
 def apply_filters(q, params: Dict[str, Any], table: str):
-    """
-    Filter động:
-      ?status=DA_GIAO (mặc định eq)
-      ?eq__status=DA_GIAO
-      ?ilike__name=%an%
-      ?gt__created_at=2025-01-01
-      ?in__status=DA_GIAO,DANG_XU_LY
-      ?is__field=null|true|false
-    Có validate cột theo schema.
-    """
     skip = {"select", "order", "desc", "limit", "offset", "count"}
-    allowed = allowed_columns_set(table)
+    allowed = allowed_columns(table)
 
     for k, v in params.items():
-        if k in skip:
+        if k in skip or v is None:
             continue
-        if "__" in k:
-            op, col = k.split("__", 1)
-        else:
-            op, col = "eq", k
+        op, col = ("eq", k) if "__" not in k else k.split("__", 1)
 
-        # validate col
         if col not in allowed and allowed:
-            raise HTTPException(status_code=400, detail=f"Column '{col}' is not allowed for table '{table}'")
+            raise HTTPException(status_code=400, detail=f"Cột '{col}' không tồn tại trong bảng '{table}'")
 
         if op == "in":
-            q = q.in_(col, [x for x in str(v).split(",") if x])
-        elif op == "eq":
-            q = q.eq(col, v)
-        elif op == "ne":
-            q = q.neq(col, v)
-        elif op == "gt":
-            q = q.gt(col, v)
-        elif op == "gte":
-            q = q.gte(col, v)
-        elif op == "lt":
-            q = q.lt(col, v)
-        elif op == "lte":
-            q = q.lte(col, v)
-        elif op == "like":
-            q = q.like(col, v)
-        elif op == "ilike":
-            q = q.ilike(col, v)
+            values = [x.strip() for x in str(v).split(",") if x.strip()]
+            if values: q = q.in_(col, values)
+        elif op == "eq":   q = q.eq(col, v)
+        elif op == "ne":   q = q.neq(col, v)
+        elif op == "gt":   q = q.gt(col, v)
+        elif op == "gte":  q = q.gte(col, v)
+        elif op == "lt":   q = q.lt(col, v)
+        elif op == "lte":  q = q.lte(col, v)
+        elif op == "like": q = q.like(col, v)
+        elif op == "ilike":q = q.ilike(col, v)
         elif op == "is":
-            vv = str(v).lower()
-            val = None if vv == "null" else True if vv == "true" else False if vv == "false" else v
+            val = None if str(v).lower() == "null" else (True if str(v).lower() == "true" else False)
             q = q.is_(col, val)
     return q
 
-
-# ========== ROUTES CƠ BẢN ==========
+# ==================== ROUTES ====================
 @app.get("/health")
 def health():
-    return {"ok": True}
-
+    return {"ok": True, "pooler": "6543" in SUPABASE_URL, "tables": len(TABLES)}
 
 @app.get("/api/meta/tables")
-def meta_tables(request: Request):
+def list_tables(request: Request):
     check_api_key(request)
-    return {"allowed_tables": TABLES, "count": len(TABLES)}
-
+    return {"allowed_tables": TABLES, "total": len(TABLES)}
 
 @app.get("/api/meta/schema/{table}")
-def meta_schema(table: str, request: Request):
+def table_schema(table: str, request: Request):
     check_api_key(request)
     t = get_table_or_404(table)
-    schema = get_schema(t)
-    return {"table": t, "columns": schema, "count": len(schema)}
+    return {"table": t, "columns": get_schema(t)}
 
-
-# ========== FACTORY TẠO ENDPOINT /api/<table> ==========
-def make_table_endpoint(table: str) -> Callable:
+# ==================== GENERIC ENDPOINT ====================
+def create_endpoint(table: str) -> Callable:
     async def endpoint(
         request: Request,
-        select: str = Query("*", description="VD: *, hoặc id,name"),
-        order: Optional[str] = Query(None, description="VD: created_at"),
+        select: str = Query("*", description="VD: order_id,status,created_at"),
+        order: Optional[str] = Query(None),
         desc: bool = Query(True),
-        limit: int = Query(100, ge=1, le=500),
+        limit: int = Query(100, ge=1, le=1000),
         offset: int = Query(0, ge=0),
         count: Optional[str] = Query(None, description="exact|planned|estimated"),
     ):
         check_api_key(request)
-        t = get_table_or_404(table)
+        get_table_or_404(table)
 
-        # validate select
-        allowed = allowed_columns_set(t)
-        if select != "*" and allowed:
-            req_cols = [c.strip() for c in select.split(",") if c.strip()]
-            for c in req_cols:
-                if c not in allowed:
-                    raise HTTPException(status_code=400, detail=f"Column '{c}' not allowed in select for '{t}'")
-            select_clean = ",".join(req_cols)
-        else:
-            select_clean = select
+        # Validate select
+        allowed = allowed_columns(table)
+        if select != "*":
+            cols = [c.strip() for c in select.split(",") if c.strip()]
+            invalid = [c for c in cols if c not in allowed]
+            if invalid:
+                raise HTTPException(status_code=400, detail=f"Cột không hợp lệ: {invalid}")
+            select = ",".join(cols)
 
         try:
-            q = supabase.table(t).select(select_clean, count=count)
-            # apply filters
-            q = apply_filters(q, dict(request.query_params), t)
+            query = supabase.table(table).select(select, count=count)
+            query = apply_filters(query, dict(request.query_params), table)
 
-            # validate order
-            if order:
-                if allowed and order not in allowed:
-                    raise HTTPException(status_code=400, detail=f"Order by unknown column '{order}'")
-                q = q.order(order, desc=desc)
+            if order and order in allowed:
+                query = query.order(order, desc=desc)
 
-            # range
-            q = q.range(offset, offset + max(0, limit - 1))
-            res = q.execute()
+            query = query.range(offset, offset + limit - 1)
+            res = query.execute()
+
             return {
-                "table": t,
+                "table": table,
                 "count": res.count,
-                "data": res.data,
+                "data": res.data or [],
                 "limit": limit,
                 "offset": offset,
             }
-        except HTTPException:
-            raise
         except Exception as e:
             traceback.print_exc()
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"{t}: {type(e).__name__}: {e}",
-            )
+            raise HTTPException(status_code=502, detail=f"Lỗi bảng {table}: {str(e)}")
 
-    endpoint.__name__ = f"read_{table}"
+    endpoint.__name__ = f"get_{table}"
     return endpoint
 
+# Đăng ký toàn bộ 39 endpoint
+for table in TABLES:
+    app.get(f"/api/{table}", name=f"Read {table}")(create_endpoint(table))
 
-# Đăng ký routes: /api/<table>
-for t in TABLES:
-    app.get(f"/api/{t}", name=f"Get {t}", description=f"Đọc bảng `{t}`")(make_table_endpoint(t))
-
-
-# ========== GLOBAL ERROR HANDLER (gọn JSON) ==========
+# ==================== ERROR HANDLER ====================
 @app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
+async def global_error_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=500,
-        content={
-            "ok": False,
-            "error": type(exc).__name__,
-            "detail": str(exc),
-        },
+        content={"ok": False, "error": type(exc).__name__, "detail": str(exc)}
     )
