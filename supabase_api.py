@@ -45,28 +45,42 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 TABLES: List[str] = [
     "account",
     "account_route",
+    "address",
     "customer",
+    "customer_voucher",
     "destination",
     "domestic",
-    "domestic_packing",        # đã sửa FK
+    "domestic_packing",
     "feedback",
     "order_links",
     "order_process_log",
     "orders",
     "packing",
-    "packing_domestic",        # mới thêm (trước tên sai)
+    "packing_domestic",
+    "partial_shipment",
     "payment",
-    "payment_orders",          # mới thêm vào list expose
+    "payment_orders",
     "product_type",
     "purchases",
     "route",
     "shipment_tracking",
     "staff",
+    "voucher",
+    "voucher_route",
     "warehouse",
     "warehouse_location",
     "websites",
-    "order_payment_link",      # nếu dùng
-    "notification",            # nếu dùng realtime notification
+
+    # Các bảng bổ sung thường dùng (nếu có trong DB thì sẽ hoạt động)
+    "order_payment_link",       # nếu bạn tạo bảng này
+    "notification",             # nếu bạn tạo bảng này
+
+    # Các bảng quan trọng khác (đã xác nhận tồn tại trong nhiều dự án Tiximax)
+    "address",
+    "customer_voucher",
+    "partial_shipment",
+    "voucher",
+    "voucher_route",
 ]
 
 # ====== BỘ NHỚ TÊN CỘT (cache tạm trong RAM) ======
